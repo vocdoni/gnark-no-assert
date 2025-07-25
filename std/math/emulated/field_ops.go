@@ -3,9 +3,11 @@ package emulated
 import (
 	"errors"
 	"fmt"
+	"math/big"
 	"math/bits"
 
 	"github.com/consensys/gnark/frontend"
+	limbs "github.com/consensys/gnark/std/internal/limbcomposition"
 	"github.com/consensys/gnark/std/selector"
 )
 
@@ -359,4 +361,38 @@ type overflowError struct {
 
 func (e overflowError) Error() string {
 	return fmt.Sprintf("op %s overflow %d exceeds max %d", e.op, e.nextOverflow, e.maxOverflow)
+}
+
+func (f *Field[T]) String(a *Element[T]) string {
+	// for debug only, if is not test engine then no-op
+	var fp T
+	blimbs := make([]*big.Int, len(a.Limbs))
+	for i, v := range a.Limbs {
+		switch vv := v.(type) {
+		case *big.Int:
+			blimbs[i] = vv
+		case big.Int:
+			blimbs[i] = &vv
+		case int:
+			blimbs[i] = new(big.Int)
+			blimbs[i].SetInt64(int64(vv))
+		case uint:
+			blimbs[i] = new(big.Int)
+			blimbs[i].SetUint64(uint64(vv))
+		default:
+			return "???"
+		}
+	}
+	res := new(big.Int)
+	err := limbs.Recompose(blimbs, fp.BitsPerLimb(), res)
+	if err != nil {
+		return "!!!"
+	}
+	reduced := new(big.Int).Mod(res, fp.Modulus())
+	return reduced.String()
+}
+
+func (f *Field[T]) Println(a *Element[T]) {
+	res := f.String(a)
+	fmt.Println(res)
 }

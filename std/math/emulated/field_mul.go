@@ -247,7 +247,8 @@ func (f *Field[T]) mulMod(a, b *Element[T], _ uint, p *Element[T]) *Element[T] {
 		r: r,
 		p: p,
 	}
-	f.deferredChecks = append(f.deferredChecks, &mc)
+	f.profilingDeferredCheck(&mc)
+	// f.deferredChecks = append(f.deferredChecks, &mc)
 	return r
 }
 
@@ -275,7 +276,8 @@ func (f *Field[T]) checkZero(a *Element[T], p *Element[T]) {
 		r: r, // expected to be zero on zero limbs.
 		p: p,
 	}
-	f.deferredChecks = append(f.deferredChecks, &mc)
+	// f.deferredChecks = append(f.deferredChecks, &mc)
+	f.profilingDeferredCheck(&mc)
 }
 
 // evalWithChallenge represents element a as a polynomial a(X) and evaluates at
@@ -835,8 +837,8 @@ func (f *Field[T]) Eval(at [][]*Element[T], coefs []int) *Element[T] {
 		k:    k,
 		c:    c,
 	}
-
-	f.deferredChecks = append(f.deferredChecks, &mvc)
+	// f.deferredChecks = append(f.deferredChecks, &mvc)
+	f.profilingDeferredCheck(&mvc)
 	return r
 }
 
@@ -1206,4 +1208,34 @@ func limbMul(lhs []*big.Int, rhs []*big.Int) []*big.Int {
 		}
 	}
 	return res
+}
+
+func (f *Field[T]) profilingDeferredCheck(df deferredChecker) {
+	var toCommit []frontend.Variable
+	for i := range f.deferredChecks {
+		toCommit = append(toCommit, f.deferredChecks[i].toCommit()...)
+	}
+	multicommit.WithCommitment(f.api, func(api frontend.API, commitment frontend.Variable) error {
+		return nil
+	}, toCommit...)
+	commitment := -1
+	// for efficiency, we compute all powers of the challenge as slice at.
+	coefsLen := int(f.fParams.NbLimbs())
+	coefsLen = max(coefsLen, df.maxLen())
+	at := make([]frontend.Variable, coefsLen)
+	at[0] = commitment
+	for i := 1; i < len(at); i++ {
+		at[i] = f.api.Mul(at[i-1], commitment)
+	}
+	// evaluate all r, k, c
+	df.evalRound1(at)
+	df.evalRound2(at)
+	// evaluate p(X) at challenge
+	pval := f.evalWithChallenge(f.Modulus(), at)
+	// compute (2^t-X) at challenge
+	coef := big.NewInt(1)
+	coef.Lsh(coef, f.fParams.BitsPerLimb())
+	ccoef := f.api.Sub(coef, commitment)
+	// verify all mulchecks
+	df.check(f.api, pval.evaluation, ccoef)
 }
