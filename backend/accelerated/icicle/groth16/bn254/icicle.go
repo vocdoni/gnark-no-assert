@@ -13,6 +13,7 @@ import (
 	"math/bits"
 	"os"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/consensys/gnark-crypto/ecc"
@@ -47,6 +48,11 @@ var isProfileMode bool
 func init() {
 	_, isProfileMode = os.LookupEnv("ICICLE_STEP_PROFILE")
 }
+
+var (
+	nttDomainMu          sync.Mutex
+	nttDomainMaxByDevice = make(map[int32]uint64)
+)
 
 func (pk *ProvingKey) setupDevicePointers(device *icicle_runtime.Device) error {
 	if pk.deviceInfo != nil {
@@ -90,6 +96,28 @@ func (pk *ProvingKey) setupDevicePointers(device *icicle_runtime.Device) error {
 	copy(pk.CosetGenerator[:], limbs[:fr.Limbs*2])
 	var rouIcicle icicle_bn254.ScalarField
 	rouIcicle.FromLimbs(limbs)
+
+	requestedDomainSize := uint64(pk.Domain.Cardinality)
+	needDomainRelease := false
+
+	nttDomainMu.Lock()
+	currentMax := nttDomainMaxByDevice[device.Id]
+	if requestedDomainSize > currentMax {
+		needDomainRelease = currentMax != 0
+		nttDomainMaxByDevice[device.Id] = requestedDomainSize
+	}
+	nttDomainMu.Unlock()
+
+	if needDomainRelease {
+		releaseDomain := make(chan struct{})
+		icicle_runtime.RunOnDevice(device, func(args ...any) {
+			if err := icicle_ntt.ReleaseDomain(); err != icicle_runtime.Success && err != icicle_runtime.ApiNotImplemented {
+				panic(fmt.Sprintf("release ntt domain: %s", err.AsString()))
+			}
+			close(releaseDomain)
+		})
+		<-releaseDomain
+	}
 
 	initDomain := make(chan struct{})
 	icicle_runtime.RunOnDevice(device, func(args ...any) {
