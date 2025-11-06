@@ -9,6 +9,7 @@ package bls12377
 
 import (
 	"fmt"
+	"math"
 	"math/big"
 	"math/bits"
 	"os"
@@ -278,9 +279,7 @@ func msmChunkedG1(scalars icicle_core.DeviceSlice, bases icicle_core.DeviceSlice
 		return curve.G1Jac{}, 0, nil
 	}
 
-	capMSMWindow(&cfg, size, fr.Bits, unsafe.Sizeof(fr.Element{}), unsafe.Sizeof(curve.G1Affine{}), unsafe.Sizeof(icicle_bls12377.Projective{}))
-
-	chunks := initialChunkCount(size, scalars, bases)
+	chunks := configureMSM(&cfg, size, scalars, bases, fr.Bits, unsafe.Sizeof(fr.Element{}), unsafe.Sizeof(curve.G1Affine{}), unsafe.Sizeof(icicle_bls12377.Projective{}))
 	for {
 		cg := cfg
 		var ext *icicle_config_extension.ConfigExtension
@@ -315,9 +314,7 @@ func msmChunkedG2(scalars icicle_core.DeviceSlice, bases icicle_core.DeviceSlice
 		return curve.G2Jac{}, 0, nil
 	}
 
-	capMSMWindow(&cfg, size, fr.Bits, unsafe.Sizeof(fr.Element{}), unsafe.Sizeof(curve.G2Affine{}), unsafe.Sizeof(icicle_g2.G2Projective{}))
-
-	chunks := initialChunkCount(size, scalars, bases)
+	chunks := configureMSM(&cfg, size, scalars, bases, fr.Bits, unsafe.Sizeof(fr.Element{}), unsafe.Sizeof(curve.G2Affine{}), unsafe.Sizeof(icicle_g2.G2Projective{}))
 	for {
 		cg := cfg
 		var ext *icicle_config_extension.ConfigExtension
@@ -346,35 +343,107 @@ func msmChunkedG2(scalars icicle_core.DeviceSlice, bases icicle_core.DeviceSlice
 	}
 }
 
-func initialChunkCount(size int, scalars, bases icicle_core.DeviceSlice) int {
-	maxChunk := msmChunkElementCap(scalars, bases)
-	if maxChunk <= 0 || size <= maxChunk {
+func configureMSM(cfg *icicle_core.MSMConfig, msmSize int, scalars, bases icicle_core.DeviceSlice, bitsize int, scalarBytes, affineBytes, projectiveBytes uintptr) int {
+	if msmSize <= 0 {
 		return 1
 	}
-	return (size + maxChunk - 1) / maxChunk
+
+	freeMem := 0.0
+	if mem, err := icicle_runtime.GetAvailableMemory(); err == icicle_runtime.Success && mem != nil {
+		freeMem = float64(mem.Free)
+	}
+
+	maxWindow := getConfiguredMSMMaxWindow()
+	selectedC := int(cfg.C)
+	if selectedC <= 0 || selectedC > maxWindow {
+		selectedC = maxWindow
+	}
+	if cfg.Bitsize > 0 && int(cfg.Bitsize) < bitsize {
+		bitsize = int(cfg.Bitsize)
+	}
+	if selectedC > bitsize {
+		selectedC = bitsize
+	}
+	if selectedC < 4 {
+		selectedC = 4
+	}
+
+	precompute := int(cfg.PrecomputeFactor)
+	if precompute <= 0 {
+		precompute = 1
+	}
+	batchSize := int(cfg.BatchSize)
+	if batchSize <= 0 {
+		batchSize = 1
+	}
+
+	scalarsOnDevice := scalars.Len() > 0
+	basesOnDevice := bases.Len() > 0
+
+	minChunks, tunedC, tunedBatch := computeMinMSMChunks(
+		msmSize,
+		bitsize,
+		selectedC,
+		precompute,
+		batchSize,
+		cfg.ArePointsSharedInBatch,
+		scalarBytes,
+		affineBytes,
+		projectiveBytes,
+		freeMem,
+		scalarsOnDevice,
+		basesOnDevice,
+	)
+
+	cfg.C = int32(tunedC)
+	cfg.BatchSize = int32(tunedBatch)
+
+	chunkCount := minChunks
+	if chunkCount <= 1 && (!scalarsOnDevice || !basesOnDevice) {
+		chunkCount = 4
+	}
+	if chunkCount < 1 {
+		chunkCount = 1
+	}
+
+	capChunks := chunkCountFromCap(msmSize, scalars, bases, freeMem)
+	if capChunks > chunkCount {
+		chunkCount = capChunks
+	}
+	if chunkCount > msmSize {
+		chunkCount = msmSize
+	}
+	return chunkCount
 }
 
-func msmChunkElementCap(scalars, bases icicle_core.DeviceSlice) int {
+func chunkCountFromCap(size int, scalars, bases icicle_core.DeviceSlice, freeMem float64) int {
 	cap := getConfiguredMSMChunkCap()
 	if cap <= 0 {
-		return 0
-	}
-
-	mem, err := icicle_runtime.GetAvailableMemory()
-	if err == icicle_runtime.Success && mem != nil {
-		perElem := scalars.SizeOfElement() + bases.SizeOfElement() + 128
-		if perElem > 0 {
-			capByMem := int((mem.Free / 4) / uint(perElem))
-			if capByMem > 0 && capByMem < cap {
-				cap = capByMem
-			}
-		}
-	}
-
-	if cap < 1 {
 		return 1
 	}
-	return cap
+	if size <= cap {
+		return 1
+	}
+
+	scalarElem := 0
+	if scalars.Len() > 0 {
+		scalarElem = scalars.SizeOfElement()
+	}
+	baseElem := 0
+	if bases.Len() > 0 {
+		baseElem = bases.SizeOfElement()
+	}
+	perElem := scalarElem + baseElem + 128
+	if perElem > 0 && freeMem > 0 {
+		capByMem := int((freeMem * 0.7) / float64(perElem))
+		if capByMem > 0 && capByMem < cap {
+			cap = capByMem
+		}
+	}
+	if cap < 1 {
+		return size
+	}
+	return (size + cap - 1) / cap
 }
 
 func getConfiguredMSMChunkCap() int {
@@ -405,68 +474,184 @@ func getConfiguredMSMMaxWindow() int {
 	return msmMaxWindow
 }
 
-func capMSMWindow(cfg *icicle_core.MSMConfig, msmSize int, bitsize int, scalarBytes, affineBytes, projectiveBytes uintptr) {
-	maxWindow := getConfiguredMSMMaxWindow()
-	desired := int(cfg.C)
-	if desired <= 0 || desired > maxWindow {
-		desired = maxWindow
+func computeMinMSMChunks(msmSize, bitsize, initialC, precompute, batchSize int, sharedPoints bool, scalarBytes, affineBytes, projectiveBytes uintptr, freeMem float64, scalarsOnDevice, basesOnDevice bool) (int, int, int) {
+	if msmSize <= 0 {
+		return 1, initialC, batchSize
 	}
-	if cfg.Bitsize > 0 {
-		bitsize = int(cfg.Bitsize)
+	currentC := initialC
+	if currentC < 4 {
+		currentC = 4
 	}
-	if desired > bitsize {
-		desired = bitsize
+	if currentC > bitsize {
+		currentC = bitsize
 	}
 
-	precompute := int(cfg.PrecomputeFactor)
-	if precompute <= 0 {
+	effectiveBatch := batchSize
+	if effectiveBatch < 1 {
+		effectiveBatch = 1
+	}
+	if precompute < 1 {
 		precompute = 1
 	}
-	batchSize := int(cfg.BatchSize)
-	if batchSize <= 0 {
-		batchSize = 1
-	}
 
-	memoryInfo, err := icicle_runtime.GetAvailableMemory()
-	freeMem := float64(0)
-	if err == icicle_runtime.Success && memoryInfo != nil {
-		freeMem = float64(memoryInfo.Free)
+	for {
+		nofBmsAfter, scalarsMem, indicesMem, pointsMem, bucketsMem, reduced := computeRequiredMSMMemory(
+			msmSize,
+			currentC,
+			effectiveBatch,
+			bitsize,
+			precompute,
+			sharedPoints,
+			scalarBytes,
+			affineBytes,
+			projectiveBytes,
+			freeMem,
+			scalarsOnDevice,
+			basesOnDevice,
+		)
+
+		minChunks := 1
+
+		if effectiveBatch > 1 {
+			var lowerBound float64
+			if sharedPoints {
+				if pointsMem*2 > reduced {
+					minChunks = 0
+				} else {
+					denom := reduced - 2*pointsMem
+					if denom <= 0 {
+						minChunks = 0
+					} else {
+						lowerBound = (2*(scalarsMem+indicesMem) + bucketsMem) / denom
+						minChunks = int(math.Floor(lowerBound)) + 1
+					}
+				}
+			} else {
+				if reduced <= 0 {
+					minChunks = 0
+				} else {
+					lowerBound = (2*(scalarsMem+pointsMem+indicesMem) + bucketsMem) / reduced
+					minChunks = int(math.Floor(lowerBound)) + 1
+				}
+			}
+			if minChunks == 0 || minChunks > effectiveBatch {
+				effectiveBatch = 1
+				continue
+			}
+		}
+
+		if effectiveBatch < 2 {
+			for bucketsMem > reduced && currentC > 4 {
+				denom := float64(3) * float64(projectiveBytes) * float64(nofBmsAfter)
+				if denom <= 0 || reduced <= 0 {
+					currentC = 4
+					break
+				}
+				nextC := int(math.Floor(math.Log2(reduced / denom)))
+				if nextC < 4 {
+					nextC = 4
+				}
+				if nextC >= currentC {
+					nextC = currentC - 1
+				}
+				if nextC < 4 {
+					nextC = 4
+				}
+				if nextC == currentC {
+					break
+				}
+				currentC = nextC
+				nofBmsAfter, scalarsMem, indicesMem, pointsMem, bucketsMem, reduced = computeRequiredMSMMemory(
+					msmSize,
+					currentC,
+					1,
+					bitsize,
+					precompute,
+					sharedPoints,
+					scalarBytes,
+					affineBytes,
+					projectiveBytes,
+					freeMem,
+					scalarsOnDevice,
+					basesOnDevice,
+				)
+			}
+			denom := reduced - bucketsMem
+			if denom <= 0 {
+				minChunks = msmSize
+			} else {
+				lowerBound := (2 * (scalarsMem + pointsMem + indicesMem)) / denom
+				minChunks = int(math.Floor(lowerBound)) + 1
+				if minChunks < 1 {
+					minChunks = 1
+				}
+			}
+		}
+
+		if minChunks > msmSize {
+			minChunks = msmSize
+		}
+		if currentC > bitsize {
+			currentC = bitsize
+		}
+		if currentC < 4 {
+			currentC = 4
+		}
+
+		return minChunks, currentC, effectiveBatch
 	}
-	if freeMem <= 0 {
-		cfg.C = int32(desired)
-		return
 }
 
-	scalarSize := float64(scalarBytes)
-	affineSize := float64(affineBytes)
-	projectiveSize := float64(projectiveBytes)
-
-	for c := desired; c >= 4; c-- {
-		nofBms := (bitsize + c - 1) / c
-		if nofBms < 1 {
-			nofBms = 1
-		}
-		nofBmsAfter := (nofBms + precompute - 1) / precompute
-
-		scalarsMem := scalarSize * float64(msmSize*batchSize)
-		indicesMem := float64(7*4) * float64(msmSize*batchSize*nofBms)
-		pointsMem := affineSize * float64(msmSize*precompute)
-		if !cfg.ArePointsSharedInBatch {
-			pointsMem *= float64(batchSize)
-		}
-
-		gpuMem := freeMem + scalarsMem + pointsMem
-		reducedMem := 0.7 * gpuMem
-
-		bucketsMem := 4 * projectiveSize * float64(uint64(1)<<uint(c)) * float64(batchSize*nofBmsAfter)
-
-		if bucketsMem+indicesMem <= reducedMem {
-			cfg.C = int32(c)
-			return
-		}
+func computeRequiredMSMMemory(
+	msmSize,
+	c,
+	batchSize,
+	bitsize,
+	precompute int,
+	sharedPoints bool,
+	scalarBytes,
+	affineBytes,
+	projectiveBytes uintptr,
+	freeMem float64,
+	scalarsOnDevice,
+	basesOnDevice bool,
+) (int, float64, float64, float64, float64, float64) {
+	if msmSize <= 0 {
+		return 1, 0, 0, 0, 0, freeMem
 	}
 
-	cfg.C = 4
+	nofBms := (bitsize + c - 1) / c
+	if nofBms < 1 {
+		nofBms = 1
+	}
+	nofBmsAfter := (nofBms + precompute - 1) / precompute
+	if nofBmsAfter < 1 {
+		nofBmsAfter = 1
+	}
+
+	scalarsMem := float64(scalarBytes) * float64(msmSize*batchSize)
+	indicesMem := float64(7*unsafe.Sizeof(uint32(0))) * float64(msmSize*batchSize*nofBms)
+	pointsMem := float64(affineBytes) * float64(msmSize*precompute)
+	if !sharedPoints {
+		pointsMem *= float64(batchSize)
+	}
+
+	var bucketFactor float64 = 4
+	bucketsMem := bucketFactor * float64(projectiveBytes) * float64(uint64(1)<<uint(c)) * float64(batchSize*nofBmsAfter)
+
+	available := freeMem
+	if freeMem <= 0 {
+		available = 0
+	}
+	if basesOnDevice {
+		available += pointsMem
+	}
+	if scalarsOnDevice {
+		available += scalarsMem
+	}
+
+	reduced := available * 0.7
+	return nofBmsAfter, scalarsMem, indicesMem, pointsMem, bucketsMem, reduced
 }
 
 // Prove generates the proof of knowledge of a r1cs with full witness (secret + public part).
