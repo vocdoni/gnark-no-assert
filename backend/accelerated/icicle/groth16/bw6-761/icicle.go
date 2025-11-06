@@ -40,6 +40,7 @@ import (
 	icicle_ntt "github.com/ingonyama-zk/icicle-gnark/v3/wrappers/golang/curves/bw6761/ntt"
 	icicle_vecops "github.com/ingonyama-zk/icicle-gnark/v3/wrappers/golang/curves/bw6761/vecOps"
 	icicle_runtime "github.com/ingonyama-zk/icicle-gnark/v3/wrappers/golang/runtime"
+	icicle_config_extension "github.com/ingonyama-zk/icicle-gnark/v3/wrappers/golang/runtime/config_extension"
 
 	fcs "github.com/consensys/gnark/frontend/cs"
 )
@@ -262,56 +263,32 @@ func msmChunkedG1(scalars icicle_core.DeviceSlice, bases icicle_core.DeviceSlice
 		return curve.G1Jac{}, 0, nil
 	}
 
-	chunks := 1
-	if hint := initialChunkCount(size, scalars, bases); hint > chunks {
-		chunks = hint
-	}
+	chunks := initialChunkCount(size, scalars, bases)
 	for {
-		chunkSize := (size + chunks - 1) / chunks
-		if chunkSize <= 0 {
-			chunkSize = 1
+		cg := cfg
+		var ext *icicle_config_extension.ConfigExtension
+		if chunks > 1 {
+			ext = icicle_config_extension.Create()
+			ext.SetInt(icicle_core.CUDA_MSM_NOF_CHUNKS, chunks)
+			cg.Ext = ext.AsUnsafePointer()
 		}
 
-		var acc curve.G1Jac
-		haveResult := false
-		outOfMemory := false
-
-		for start := 0; start < size; {
-			end := start + chunkSize
-			if end > size {
-				end = size
-			}
-
-			cfgLocal := cfg
-			res := make(icicle_core.HostSlice[icicle_bw6761.Projective], 1)
-			if err := icicle_msm.Msm(scalars.Range(start, end, false), bases.Range(start, end, false), &cfgLocal, res); err != icicle_runtime.Success {
-				if err == icicle_runtime.OutOfMemory {
-					outOfMemory = true
-					break
-				}
-				return curve.G1Jac{}, chunks, fmt.Errorf("icicle MSM chunk [%d:%d/%d]: %s", start, end, size, err.AsString())
-			}
-
-			chunkJac := g1ProjectiveToG1Jac(res[0])
-			if haveResult {
-				acc.AddAssign(&chunkJac)
-			} else {
-				acc = chunkJac
-				haveResult = true
-			}
-
-			start = end
+		res := make(icicle_core.HostSlice[icicle_bw6761.Projective], 1)
+		err := icicle_msm.Msm(scalars, bases, &cg, res)
+		if ext != nil {
+			icicle_config_extension.Delete(ext)
 		}
 
-		if outOfMemory {
-			if chunkSize == 1 {
-				return curve.G1Jac{}, chunks, fmt.Errorf("icicle MSM exhausted device memory with chunk size 1")
-			}
-			chunks *= 2
-			continue
+		if err == icicle_runtime.Success {
+			return g1ProjectiveToG1Jac(res[0]), chunks, nil
 		}
-
-		return acc, chunks, nil
+		if err != icicle_runtime.OutOfMemory && err != icicle_runtime.AllocationFailed {
+			return curve.G1Jac{}, chunks, fmt.Errorf("icicle MSM: %s", err.AsString())
+		}
+		if chunks >= size {
+			return curve.G1Jac{}, chunks, fmt.Errorf("icicle MSM exhausted device memory with chunk size 1")
+		}
+		chunks *= 2
 	}
 }
 
@@ -321,56 +298,32 @@ func msmChunkedG2(scalars icicle_core.DeviceSlice, bases icicle_core.DeviceSlice
 		return curve.G2Jac{}, 0, nil
 	}
 
-	chunks := 1
-	if hint := initialChunkCount(size, scalars, bases); hint > chunks {
-		chunks = hint
-	}
+	chunks := initialChunkCount(size, scalars, bases)
 	for {
-		chunkSize := (size + chunks - 1) / chunks
-		if chunkSize <= 0 {
-			chunkSize = 1
+		cg := cfg
+		var ext *icicle_config_extension.ConfigExtension
+		if chunks > 1 {
+			ext = icicle_config_extension.Create()
+			ext.SetInt(icicle_core.CUDA_MSM_NOF_CHUNKS, chunks)
+			cg.Ext = ext.AsUnsafePointer()
 		}
 
-		var acc curve.G2Jac
-		haveResult := false
-		outOfMemory := false
-
-		for start := 0; start < size; {
-			end := start + chunkSize
-			if end > size {
-				end = size
-			}
-
-			cfgLocal := cfg
-			res := make(icicle_core.HostSlice[icicle_g2.G2Projective], 1)
-			if err := icicle_g2.G2Msm(scalars.Range(start, end, false), bases.Range(start, end, false), &cfgLocal, res); err != icicle_runtime.Success {
-				if err == icicle_runtime.OutOfMemory {
-					outOfMemory = true
-					break
-				}
-				return curve.G2Jac{}, chunks, fmt.Errorf("icicle G2 MSM chunk [%d:%d/%d]: %s", start, end, size, err.AsString())
-			}
-
-			chunkJac := g2ProjectiveToG2Jac(&res[0])
-			if haveResult {
-				acc.AddAssign(&chunkJac)
-			} else {
-				acc = chunkJac
-				haveResult = true
-			}
-
-			start = end
+		res := make(icicle_core.HostSlice[icicle_g2.G2Projective], 1)
+		err := icicle_g2.G2Msm(scalars, bases, &cg, res)
+		if ext != nil {
+			icicle_config_extension.Delete(ext)
 		}
 
-		if outOfMemory {
-			if chunkSize == 1 {
-				return curve.G2Jac{}, chunks, fmt.Errorf("icicle G2 MSM exhausted device memory with chunk size 1")
-			}
-			chunks *= 2
-			continue
+		if err == icicle_runtime.Success {
+			return g2ProjectiveToG2Jac(&res[0]), chunks, nil
 		}
-
-		return acc, chunks, nil
+		if err != icicle_runtime.OutOfMemory && err != icicle_runtime.AllocationFailed {
+			return curve.G2Jac{}, chunks, fmt.Errorf("icicle G2 MSM: %s", err.AsString())
+		}
+		if chunks >= size {
+			return curve.G2Jac{}, chunks, fmt.Errorf("icicle G2 MSM exhausted device memory with chunk size 1")
+		}
+		chunks *= 2
 	}
 }
 
