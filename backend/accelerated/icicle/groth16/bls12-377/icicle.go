@@ -279,7 +279,16 @@ func msmChunkedG1(scalars icicle_core.DeviceSlice, bases icicle_core.DeviceSlice
 		return curve.G1Jac{}, 0, nil
 	}
 
-	chunks := configureMSM(&cfg, size, scalars, bases, fr.Bits, unsafe.Sizeof(fr.Element{}), unsafe.Sizeof(curve.G1Affine{}), unsafe.Sizeof(icicle_bls12377.Projective{}))
+	chunks := configureMSM(
+		&cfg,
+		size,
+		scalars,
+		bases,
+		fr.Bits,
+		int(unsafe.Sizeof(fr.Element{})),
+		int(unsafe.Sizeof(icicle_bls12377.Affine{})),
+		int(unsafe.Sizeof(icicle_bls12377.Projective{})),
+	)
 	for {
 		cg := cfg
 		var ext *icicle_config_extension.ConfigExtension
@@ -314,7 +323,16 @@ func msmChunkedG2(scalars icicle_core.DeviceSlice, bases icicle_core.DeviceSlice
 		return curve.G2Jac{}, 0, nil
 	}
 
-	chunks := configureMSM(&cfg, size, scalars, bases, fr.Bits, unsafe.Sizeof(fr.Element{}), unsafe.Sizeof(curve.G2Affine{}), unsafe.Sizeof(icicle_g2.G2Projective{}))
+	chunks := configureMSM(
+		&cfg,
+		size,
+		scalars,
+		bases,
+		fr.Bits,
+		int(unsafe.Sizeof(fr.Element{})),
+		int(unsafe.Sizeof(icicle_g2.G2Affine{})),
+		int(unsafe.Sizeof(icicle_g2.G2Projective{})),
+	)
 	for {
 		cg := cfg
 		var ext *icicle_config_extension.ConfigExtension
@@ -343,7 +361,7 @@ func msmChunkedG2(scalars icicle_core.DeviceSlice, bases icicle_core.DeviceSlice
 	}
 }
 
-func configureMSM(cfg *icicle_core.MSMConfig, msmSize int, scalars, bases icicle_core.DeviceSlice, bitsize int, scalarBytes, affineBytes, projectiveBytes uintptr) int {
+func configureMSM(cfg *icicle_core.MSMConfig, msmSize int, scalars, bases icicle_core.DeviceSlice, bitsize int, scalarFallback, affineFallback, projectiveBytes int) int {
 	if msmSize <= 0 {
 		return 1
 	}
@@ -366,6 +384,19 @@ func configureMSM(cfg *icicle_core.MSMConfig, msmSize int, scalars, bases icicle
 	}
 	if selectedC < 4 {
 		selectedC = 4
+	}
+
+	scalarBytes := scalarFallback
+	if l := scalars.Len(); l > 0 {
+		if sz := scalars.SizeOfElement(); sz > 0 {
+			scalarBytes = sz
+		}
+	}
+	affineBytes := affineFallback
+	if l := bases.Len(); l > 0 {
+		if sz := bases.SizeOfElement(); sz > 0 {
+			affineBytes = sz
+		}
 	}
 
 	precompute := int(cfg.PrecomputeFactor)
@@ -406,7 +437,7 @@ func configureMSM(cfg *icicle_core.MSMConfig, msmSize int, scalars, bases icicle
 		chunkCount = 1
 	}
 
-	capChunks := chunkCountFromCap(msmSize, scalars, bases, freeMem)
+	capChunks := chunkCountFromCap(msmSize, scalarBytes, affineBytes, freeMem)
 	if capChunks > chunkCount {
 		chunkCount = capChunks
 	}
@@ -416,7 +447,7 @@ func configureMSM(cfg *icicle_core.MSMConfig, msmSize int, scalars, bases icicle
 	return chunkCount
 }
 
-func chunkCountFromCap(size int, scalars, bases icicle_core.DeviceSlice, freeMem float64) int {
+func chunkCountFromCap(size int, scalarBytes, baseBytes int, freeMem float64) int {
 	cap := getConfiguredMSMChunkCap()
 	if cap <= 0 {
 		return 1
@@ -425,15 +456,7 @@ func chunkCountFromCap(size int, scalars, bases icicle_core.DeviceSlice, freeMem
 		return 1
 	}
 
-	scalarElem := 0
-	if scalars.Len() > 0 {
-		scalarElem = scalars.SizeOfElement()
-	}
-	baseElem := 0
-	if bases.Len() > 0 {
-		baseElem = bases.SizeOfElement()
-	}
-	perElem := scalarElem + baseElem + 128
+	perElem := scalarBytes + baseBytes + 128
 	if perElem > 0 && freeMem > 0 {
 		capByMem := int((freeMem * 0.7) / float64(perElem))
 		if capByMem > 0 && capByMem < cap {
@@ -474,7 +497,7 @@ func getConfiguredMSMMaxWindow() int {
 	return msmMaxWindow
 }
 
-func computeMinMSMChunks(msmSize, bitsize, initialC, precompute, batchSize int, sharedPoints bool, scalarBytes, affineBytes, projectiveBytes uintptr, freeMem float64, scalarsOnDevice, basesOnDevice bool) (int, int, int) {
+func computeMinMSMChunks(msmSize, bitsize, initialC, precompute, batchSize int, sharedPoints bool, scalarBytes, affineBytes, projectiveBytes int, freeMem float64, scalarsOnDevice, basesOnDevice bool) (int, int, int) {
 	if msmSize <= 0 {
 		return 1, initialC, batchSize
 	}
@@ -611,7 +634,7 @@ func computeRequiredMSMMemory(
 	sharedPoints bool,
 	scalarBytes,
 	affineBytes,
-	projectiveBytes uintptr,
+	projectiveBytes int,
 	freeMem float64,
 	scalarsOnDevice,
 	basesOnDevice bool,
