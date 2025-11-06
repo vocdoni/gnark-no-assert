@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/consensys/gnark-crypto/ecc"
 	curve "github.com/consensys/gnark-crypto/ecc/bls12-377"
@@ -53,6 +54,9 @@ var (
 
 	msmChunkCapOnce sync.Once
 	msmChunkCap     int
+
+	msmMaxWindowOnce sync.Once
+	msmMaxWindow     int
 )
 
 func init() {
@@ -274,6 +278,8 @@ func msmChunkedG1(scalars icicle_core.DeviceSlice, bases icicle_core.DeviceSlice
 		return curve.G1Jac{}, 0, nil
 	}
 
+	capMSMWindow(&cfg, size, fr.Bits, unsafe.Sizeof(fr.Element{}), unsafe.Sizeof(curve.G1Affine{}), unsafe.Sizeof(icicle_bls12377.Projective{}))
+
 	chunks := initialChunkCount(size, scalars, bases)
 	for {
 		cg := cfg
@@ -308,6 +314,8 @@ func msmChunkedG2(scalars icicle_core.DeviceSlice, bases icicle_core.DeviceSlice
 	if size == 0 {
 		return curve.G2Jac{}, 0, nil
 	}
+
+	capMSMWindow(&cfg, size, fr.Bits, unsafe.Sizeof(fr.Element{}), unsafe.Sizeof(curve.G2Affine{}), unsafe.Sizeof(icicle_g2.G2Projective{}))
 
 	chunks := initialChunkCount(size, scalars, bases)
 	for {
@@ -381,6 +389,84 @@ func getConfiguredMSMChunkCap() int {
 		msmChunkCap = cap
 	})
 	return msmChunkCap
+}
+
+func getConfiguredMSMMaxWindow() int {
+	msmMaxWindowOnce.Do(func() {
+		const defaultWindow = 16
+		maxWindow := defaultWindow
+		if val := os.Getenv("ICICLE_MSM_MAX_WINDOW"); val != "" {
+			if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 && parsed < 30 {
+				maxWindow = parsed
+			}
+		}
+		msmMaxWindow = maxWindow
+	})
+	return msmMaxWindow
+}
+
+func capMSMWindow(cfg *icicle_core.MSMConfig, msmSize int, bitsize int, scalarBytes, affineBytes, projectiveBytes uintptr) {
+	maxWindow := getConfiguredMSMMaxWindow()
+	desired := int(cfg.C)
+	if desired <= 0 || desired > maxWindow {
+		desired = maxWindow
+	}
+	if cfg.Bitsize > 0 {
+		bitsize = int(cfg.Bitsize)
+	}
+	if desired > bitsize {
+		desired = bitsize
+	}
+
+	precompute := int(cfg.PrecomputeFactor)
+	if precompute <= 0 {
+		precompute = 1
+	}
+	batchSize := int(cfg.BatchSize)
+	if batchSize <= 0 {
+		batchSize = 1
+	}
+
+	memoryInfo, err := icicle_runtime.GetAvailableMemory()
+	freeMem := float64(0)
+	if err == icicle_runtime.Success && memoryInfo != nil {
+		freeMem = float64(memoryInfo.Free)
+	}
+	if freeMem <= 0 {
+		cfg.C = int32(desired)
+		return
+}
+
+	scalarSize := float64(scalarBytes)
+	affineSize := float64(affineBytes)
+	projectiveSize := float64(projectiveBytes)
+
+	for c := desired; c >= 4; c-- {
+		nofBms := (bitsize + c - 1) / c
+		if nofBms < 1 {
+			nofBms = 1
+		}
+		nofBmsAfter := (nofBms + precompute - 1) / precompute
+
+		scalarsMem := scalarSize * float64(msmSize*batchSize)
+		indicesMem := float64(7*4) * float64(msmSize*batchSize*nofBms)
+		pointsMem := affineSize * float64(msmSize*precompute)
+		if !cfg.ArePointsSharedInBatch {
+			pointsMem *= float64(batchSize)
+		}
+
+		gpuMem := freeMem + scalarsMem + pointsMem
+		reducedMem := 0.7 * gpuMem
+
+		bucketsMem := 4 * projectiveSize * float64(uint64(1)<<uint(c)) * float64(batchSize*nofBmsAfter)
+
+		if bucketsMem+indicesMem <= reducedMem {
+			cfg.C = int32(c)
+			return
+		}
+	}
+
+	cfg.C = 4
 }
 
 // Prove generates the proof of knowledge of a r1cs with full witness (secret + public part).
