@@ -13,6 +13,7 @@ import (
 	"math/bits"
 	"os"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -52,6 +53,11 @@ func init() {
 var (
 	nttDomainMu          sync.Mutex
 	nttDomainMaxByDevice = make(map[int32]uint64)
+)
+
+var (
+	msmChunkCapOnce sync.Once
+	msmChunkCap     int
 )
 
 func (pk *ProvingKey) setupDevicePointers(device *icicle_runtime.Device) error {
@@ -271,6 +277,9 @@ func msmChunkedG1(scalars icicle_core.DeviceSlice, bases icicle_core.DeviceSlice
 	}
 
 	chunks := 1
+	if hint := initialChunkCount(size, scalars, bases); hint > chunks {
+		chunks = hint
+	}
 	for {
 		chunkSize := (size + chunks - 1) / chunks
 		if chunkSize <= 0 {
@@ -328,6 +337,9 @@ func msmChunkedG2(scalars icicle_core.DeviceSlice, bases icicle_core.DeviceSlice
 	}
 
 	chunks := 1
+	if hint := initialChunkCount(size, scalars, bases); hint > chunks {
+		chunks = hint
+	}
 	for {
 		chunkSize := (size + chunks - 1) / chunks
 		if chunkSize <= 0 {
@@ -375,6 +387,51 @@ func msmChunkedG2(scalars icicle_core.DeviceSlice, bases icicle_core.DeviceSlice
 
 		return acc, chunks, nil
 	}
+}
+
+func initialChunkCount(size int, scalars, bases icicle_core.DeviceSlice) int {
+	maxChunk := msmChunkElementCap(scalars, bases)
+	if maxChunk <= 0 || size <= maxChunk {
+		return 1
+	}
+	return (size + maxChunk - 1) / maxChunk
+}
+
+func msmChunkElementCap(scalars, bases icicle_core.DeviceSlice) int {
+	cap := getConfiguredMSMChunkCap()
+	if cap <= 0 {
+		return 0
+	}
+
+	mem, err := icicle_runtime.GetAvailableMemory()
+	if err == icicle_runtime.Success && mem != nil {
+		perElem := scalars.SizeOfElement() + bases.SizeOfElement() + 128
+		if perElem > 0 {
+			capByMem := int((mem.Free / 4) / uint(perElem))
+			if capByMem > 0 && capByMem < cap {
+				cap = capByMem
+			}
+		}
+	}
+
+	if cap < 1 {
+		return 1
+	}
+	return cap
+}
+
+func getConfiguredMSMChunkCap() int {
+	msmChunkCapOnce.Do(func() {
+		const defaultCap = 1 << 20 // 1,048,576 elements (~safe upper bound)
+		cap := defaultCap
+		if val := os.Getenv("ICICLE_MSM_MAX_CHUNK"); val != "" {
+			if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
+				cap = parsed
+			}
+		}
+		msmChunkCap = cap
+	})
+	return msmChunkCap
 }
 
 // Prove generates the proof of knowledge of a r1cs with full witness (secret + public part).
