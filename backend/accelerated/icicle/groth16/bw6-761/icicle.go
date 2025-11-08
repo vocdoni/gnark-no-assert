@@ -279,17 +279,17 @@ func msmChunkedG1(scalars icicle_core.DeviceSlice, bases icicle_core.DeviceSlice
 		int(unsafe.Sizeof(icicle_bw6761.Projective{})),
 	)
 	for {
-		cg := cfg
 		var ext *icicle_config_extension.ConfigExtension
 		if chunks > 1 {
 			ext = icicle_config_extension.Create()
 			ext.SetInt(icicle_core.CUDA_MSM_NOF_CHUNKS, chunks)
-			cg.Ext = ext.AsUnsafePointer()
+			cfg.Ext = ext.AsUnsafePointer()
 		}
 
 		res := make(icicle_core.HostSlice[icicle_bw6761.Projective], 1)
-		err := icicle_msm.Msm(scalars, bases, &cg, res)
+		err := icicle_msm.Msm(scalars, bases, &cfg, res)
 		if ext != nil {
+			cfg.Ext = nil
 			icicle_config_extension.Delete(ext)
 		}
 
@@ -323,17 +323,17 @@ func msmChunkedG2(scalars icicle_core.DeviceSlice, bases icicle_core.DeviceSlice
 		int(unsafe.Sizeof(icicle_g2.G2Projective{})),
 	)
 	for {
-		cg := cfg
 		var ext *icicle_config_extension.ConfigExtension
 		if chunks > 1 {
 			ext = icicle_config_extension.Create()
 			ext.SetInt(icicle_core.CUDA_MSM_NOF_CHUNKS, chunks)
-			cg.Ext = ext.AsUnsafePointer()
+			cfg.Ext = ext.AsUnsafePointer()
 		}
 
 		res := make(icicle_core.HostSlice[icicle_g2.G2Projective], 1)
-		err := icicle_g2.G2Msm(scalars, bases, &cg, res)
+		err := icicle_g2.G2Msm(scalars, bases, &cfg, res)
 		if ext != nil {
+			cfg.Ext = nil
 			icicle_config_extension.Delete(ext)
 		}
 
