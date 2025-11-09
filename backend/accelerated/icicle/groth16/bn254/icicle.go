@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"math/bits"
 	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"sync"
@@ -739,6 +740,7 @@ func Prove(r1cs *cs.R1CS, pk *ProvingKey, fullWitness witness.Witness, cfg *icic
 			close(ckBasisMsmDone)
 		})
 		<-ckBasisMsmDone
+		runtime.KeepAlive(privateCommittedValues[i]) // host slice must outlive CUDA DMA into privateCommittedValuesDevice[i]
 		proof.Commitments[i] = *projectiveToGnarkAffine(proofCommitmentIcicle[0])
 
 		opt.HashToFieldFn.Write(constraint.SerializeCommitment(proof.Commitments[i].Marshal(), hashed, (fr.Bits-1)/8+1))
@@ -789,6 +791,9 @@ func Prove(r1cs *cs.R1CS, pk *ProvingKey, fullWitness witness.Witness, cfg *icic
 			close(ckBasisExpSigmaMsmBatchDone)
 		})
 		<-ckBasisExpSigmaMsmBatchDone
+		for i := range privateCommittedValues {
+			runtime.KeepAlive(privateCommittedValues[i]) // keep host scalars pinned until all chunked MSM chunks finish
+		}
 		if isProfileMode {
 			log.Debug().Dur("took", time.Since(startPoKBatch)).Msg("ICICLE Batch Proof of Knowledge")
 		}
@@ -1139,6 +1144,7 @@ func computeH(a, b, c []fr.Element, pk *ProvingKey, device *icicle_runtime.Devic
 			log.Debug().Dur("took", time.Since(start)).Msg("computeH: NTT + INTT")
 		}
 		channel <- scalarsDevice
+		runtime.KeepAlive(scalars) // pin host slice until async copy/NTT on scalarsStream completes
 		close(channel)
 	}
 
