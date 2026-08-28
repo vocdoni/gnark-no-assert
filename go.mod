@@ -1,8 +1,6 @@
 module github.com/consensys/gnark
 
-go 1.23.0
-
-toolchain go1.23.8
+go 1.25.0
 
 require (
 	github.com/bits-and-blooms/bitset v1.22.0
@@ -19,7 +17,7 @@ require (
 	github.com/ronanh/intcomp v1.1.1
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.10.0
-	golang.org/x/crypto v0.39.0
+	golang.org/x/crypto v0.52.0
 	golang.org/x/exp v0.0.0-20250606033433-dcc06ee1d476
 	golang.org/x/sync v0.15.0
 )
@@ -31,7 +29,7 @@ require (
 	github.com/mmcloughlin/addchain v0.4.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	golang.org/x/sys v0.33.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	rsc.io/tmplfunc v0.0.3 // indirect
 )
